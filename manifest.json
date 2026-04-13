@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Smart Copy Cleaner",
+  "version": "1.0",
+  "description": "Preserve hyperlinks and clean unwanted text on copy",
+  "permissions": ["clipboardWrite"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
