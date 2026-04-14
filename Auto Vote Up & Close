@@ -1,0 +1,156 @@
+// ==UserScript==
+// @name         Rule34 Auto Vote Up & Close
+// @namespace    http://tampermonkey.net/
+// @version      3.0
+// @description  Automatically clicks Vote Up on Rule34 posts opened via the -upvoted_by:Stevemagegod search, refreshes on "Too Many Requests", closes on "Rated Post"
+// @author       You
+// @match        https://rule34.xxx/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ── URL Guard ─────────────────────────────────────────────────────────────
+    // Only activate when the full URL (including hash fragment) contains the
+    // search tag — encoded OR decoded form accepted.
+    const fullURL = window.location.href + window.location.hash;
+    const decoded = decodeURIComponent(fullURL);
+
+    const hasTag =
+        fullURL.includes('-upvoted_by%3AStevemagegod') ||  // encoded colon
+        fullURL.includes('-upvoted_by%3Astevemagegod') ||  // encoded, lowercase
+        decoded.includes('-upvoted_by:Stevemagegod')    ||  // decoded
+        decoded.includes('-upvoted_by:stevemagegod');       // decoded, lowercase
+
+    if (!hasTag) return; // silently exit on every other page
+
+    console.log('[AutoVote] URL matched -upvoted_by:Stevemagegod — script active.');
+
+    // ── Config ────────────────────────────────────────────────────────────────
+    const MAX_WAIT_MS   = 12000; // max wait per load before giving up (ms)
+    const POLL_INTERVAL = 400;   // polling frequency (ms)
+    const CLOSE_DELAY   = 1500;  // pause before closing tab after success (ms)
+    const REFRESH_DELAY = 3000;  // pause before reloading on rate-limit (ms)
+    const MAX_REFRESHES = 20;    // hard cap on retry refreshes
+
+    // ── Persistent refresh counter (survives reloads via GM storage) ──────────
+    let refreshCount = parseInt(GM_getValue('refreshCount', '0'), 10);
+
+    // Reset the counter when arriving on a genuinely new page (not a retry)
+    const isSamePage = document.referrer.includes(location.href.split('&')[0]);
+    if (!isSamePage) {
+        refreshCount = 0;
+        GM_setValue('refreshCount', '0');
+    }
+
+    let elapsed  = 0;
+    let voted    = false;
+    let handling = false; // guard against double-firing
+
+    // ── Utility: find the Vote Up button ─────────────────────────────────────
+    function findVoteUpButton() {
+        return (
+            document.querySelector('a#vote3') ||
+            document.querySelector('a[onclick*="vote"][onclick*="3"]') ||
+            [...document.querySelectorAll('a')].find(el =>
+                el.textContent.trim().toLowerCase() === 'vote up' ||
+                (el.title && el.title.toLowerCase().includes('vote up'))
+            )
+        );
+    }
+
+    // ── Utility: detect "Rated Post" confirmation text ────────────────────────
+    function ratedPostVisible() {
+        const selectors = [
+            '#notice-container',
+            '.notice',
+            '#note-container',
+            'div[id*="notice"]',
+            'span[style*="color: yellow"]',
+            'span[style*="color:#ff0"]',
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (el && el.textContent.toLowerCase().includes('rated post')) return true;
+        }
+        // Broad body-text fallback
+        return (document.body.innerText || '').includes('Rated Post');
+    }
+
+    // ── Utility: detect "Too Many Requests" / HTTP 429 ───────────────────────
+    function tooManyRequestsVisible() {
+        const bodyText = (document.body.innerText || '').toLowerCase();
+        return (
+            bodyText.includes('too many requests') ||
+            bodyText.includes('429') ||
+            document.title.toLowerCase().includes('too many requests')
+        );
+    }
+
+    // ── Action: schedule a page refresh ──────────────────────────────────────
+    function scheduleRefresh() {
+        if (handling) return;
+        handling = true;
+
+        refreshCount++;
+        GM_setValue('refreshCount', String(refreshCount));
+
+        if (refreshCount > MAX_REFRESHES) {
+            console.warn(`[AutoVote] Reached refresh cap (${MAX_REFRESHES}). Stopping.`);
+            return;
+        }
+
+        console.log(`[AutoVote] Rate-limited. Refresh #${refreshCount} in ${REFRESH_DELAY / 1000}s...`);
+        setTimeout(() => location.reload(), REFRESH_DELAY);
+    }
+
+    // ── Action: close the tab ─────────────────────────────────────────────────
+    function closeTab() {
+        if (handling) return;
+        handling = true;
+
+        GM_setValue('refreshCount', '0'); // reset for next post
+        console.log('[AutoVote] "Rated Post" confirmed. Closing tab...');
+        setTimeout(() => window.close(), CLOSE_DELAY);
+    }
+
+    // ── Main polling loop ─────────────────────────────────────────────────────
+    const interval = setInterval(() => {
+        elapsed += POLL_INTERVAL;
+
+        // 1 - Success: "Rated Post" visible -> close tab
+        if (ratedPostVisible()) {
+            clearInterval(interval);
+            closeTab();
+            return;
+        }
+
+        // 2 - Rate-limited: "Too Many Requests" -> refresh and retry
+        if (tooManyRequestsVisible()) {
+            clearInterval(interval);
+            scheduleRefresh();
+            return;
+        }
+
+        // 3 - Not yet voted -> click the Vote Up button
+        if (!voted) {
+            const btn = findVoteUpButton();
+            if (btn) {
+                btn.click();
+                voted = true;
+                console.log('[AutoVote] Vote Up clicked. Waiting for confirmation...');
+            }
+        }
+
+        // Timeout guard - stop polling if nothing happened within MAX_WAIT_MS
+        if (elapsed >= MAX_WAIT_MS) {
+            console.warn('[AutoVote] Timed out - no confirmation or rate-limit detected.');
+            clearInterval(interval);
+        }
+
+    }, POLL_INTERVAL);
+
+})();
