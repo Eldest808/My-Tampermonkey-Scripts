@@ -1,0 +1,393 @@
+// ==UserScript==
+// @name         Fandom File Selector
+// @namespace    https://fandom.com/
+// @version      2.0.0
+// @description  Select and copy filenames from Special:UnusedFiles and gallery pages on any Fandom wiki. Shift+Click for range select.
+// @author       You
+// @match        *://*.fandom.com/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /* ── styles ─────────────────────────────────────────────── */
+  const style = document.createElement('style');
+  style.textContent = `
+    /* Overlay sits OUTSIDE the image element so Fandom's lazy-load
+       IntersectionObserver is never disturbed */
+    .ffs-anchor {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      z-index: 9999;
+    }
+    .ffs-checkbox-wrap {
+      position: absolute;
+      top: 5px; left: 5px;
+      pointer-events: auto;
+      background: rgba(0,0,0,0.65);
+      border-radius: 4px;
+      padding: 3px 4px;
+      display: flex;
+      align-items: center;
+      transition: background 0.15s;
+      cursor: pointer;
+    }
+    .ffs-checkbox-wrap:hover { background: rgba(0,0,0,0.88); }
+    .ffs-checkbox-wrap input[type="checkbox"] {
+      width: 18px; height: 18px;
+      cursor: pointer;
+      accent-color: #e94560;
+      margin: 0;
+    }
+    .ffs-item-selected {
+      outline: 3px solid #e94560 !important;
+      outline-offset: 2px;
+    }
+    .ffs-item-selected > .ffs-anchor > .ffs-checkbox-wrap {
+      background: rgba(233,69,96,0.75);
+    }
+
+    /* ── toolbar ── */
+    #ffs-toolbar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: 56px;
+      background: #0f0f1a;
+      border-top: 2px solid #e94560;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 20px;
+      z-index: 2147483647;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.6);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    #ffs-toolbar .ffs-status {
+      flex: 1; color: #aaa; font-size: 13px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #ffs-toolbar .ffs-status strong { color: #fff; }
+    .ffs-btn {
+      padding: 8px 16px; border: none; border-radius: 6px;
+      cursor: pointer; font-size: 13px; font-weight: 600;
+      white-space: nowrap; display: flex; align-items: center; gap: 6px;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .ffs-btn:hover  { opacity: 0.85; transform: translateY(-1px); }
+    .ffs-btn:active { transform: translateY(0); }
+    .ffs-btn-copy     { background: #e94560; color: #fff; }
+    .ffs-btn-copyall  { background: transparent; color: #e94560; border: 1.5px solid #e94560; }
+    .ffs-btn-deselect { background: #2a2a3e; color: #ccc; }
+
+    /* ── toast ── */
+    .ffs-toast {
+      position: fixed; bottom: 68px; right: 20px;
+      background: #1e1e30; color: #fff;
+      border-left: 4px solid #e94560;
+      padding: 10px 18px; border-radius: 6px; font-size: 13px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      z-index: 2147483647; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+      animation: ffs-in 0.2s ease; pointer-events: none;
+    }
+    @keyframes ffs-in {
+      from { opacity:0; transform:translateY(8px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+    body { padding-bottom: 68px !important; }
+  `;
+  document.head.appendChild(style);
+
+  /* ── state ──────────────────────────────────────────────── */
+  const isUnusedFiles = /Special:UnusedFiles/i.test(location.pathname);
+  let orderedSelections = [];
+  let lastCheckedCb     = null; // Shift+Click anchor
+
+  /* ── filename helpers ───────────────────────────────────── */
+  const FILE_RE = /[Ff]ile:([^#?&"'<>\n]+)/;
+
+  function normalizeName(raw) {
+    let n = raw.replace(/^[Ff]ile:/i, '').trim();
+    try { n = decodeURIComponent(n); } catch (_) {}
+    return n.replace(/_/g, ' ');
+  }
+
+  function filenameFromHref(href) {
+    const m = href && href.match(FILE_RE);
+    return m ? normalizeName(m[0]) : null;
+  }
+
+  /* ── checkbox injection ─────────────────────────────────── */
+  function addCheckbox(filename, containerEl) {
+    if (containerEl.dataset.ffsAttached) return;
+    containerEl.dataset.ffsAttached = '1';
+
+    if (getComputedStyle(containerEl).position === 'static') {
+      containerEl.style.position = 'relative';
+    }
+
+    // Transparent overlay — pointer-events disabled so images load normally
+    const anchor = document.createElement('div');
+    anchor.className = 'ffs-anchor';
+
+    const wrap = document.createElement('label');
+    wrap.className = 'ffs-checkbox-wrap';
+    wrap.title = filename + '\nShift+Click to range-select';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.ffsFile = filename;
+
+    cb.addEventListener('change', () => {
+      syncSelection(cb, containerEl);
+      updateStatus();
+    });
+
+    // Shift+Click range select
+    cb.addEventListener('click', (e) => {
+      if (e.shiftKey && lastCheckedCb && lastCheckedCb !== cb) {
+        const all   = getAllCheckboxes();
+        const iA    = all.indexOf(lastCheckedCb);
+        const iB    = all.indexOf(cb);
+        if (iA !== -1 && iB !== -1) {
+          const [lo, hi]    = iA < iB ? [iA, iB] : [iB, iA];
+          const targetState = cb.checked; // browser already toggled it
+          for (let i = lo; i <= hi; i++) {
+            if (all[i].checked !== targetState) {
+              all[i].checked = targetState;
+              const c = all[i].closest('[data-ffs-attached]');
+              if (c) syncSelection(all[i], c);
+            }
+          }
+          updateStatus();
+        }
+      }
+      lastCheckedCb = cb;
+    });
+
+    wrap.appendChild(cb);
+    anchor.appendChild(wrap);
+    containerEl.appendChild(anchor);
+  }
+
+  function syncSelection(cb, containerEl) {
+    const f = cb.dataset.ffsFile;
+    if (cb.checked) {
+      if (!orderedSelections.includes(f)) orderedSelections.push(f);
+      containerEl.classList.add('ffs-item-selected');
+    } else {
+      orderedSelections = orderedSelections.filter(x => x !== f);
+      containerEl.classList.remove('ffs-item-selected');
+    }
+  }
+
+  /* ── page scanners ──────────────────────────────────────── */
+
+  // Selectors for elements that are purely navigation / UI — never images
+  const NAV_SKIP = [
+    '.wiki-navigation', '.wds-global-navigation', '.page-header',
+    '.fandom-community-header', '#WikiaBar', '#WikiHeader',
+    '.global-navigation', 'nav', 'header', 'footer',
+    '.categories', '.page-footer', '#toc',
+  ].join(', ');
+
+  function isNavLink(el) {
+    return !!el.closest(NAV_SKIP);
+  }
+
+  function scanContainer(root) {
+    // ── 1. Traditional MediaWiki <gallery> blocks ──────────
+    root.querySelectorAll(
+      'ul.gallery, .mw-gallery-traditional, .mw-gallery-nolines, ' +
+      '.mw-gallery-packed, .mw-gallery-packed-hover, ' +
+      '.mw-gallery-packed-overlay, .mw-gallery-slideshow, .mw-gallery-carousel'
+    ).forEach(gallery => {
+      gallery.querySelectorAll('li.gallerybox, li').forEach(item => {
+        const link = item.querySelector('a[href*="File:"]');
+        if (!link) return;
+        const filename = filenameFromHref(link.href);
+        if (!filename) return;
+        const thumb = item.querySelector('.thumb') || item;
+        addCheckbox(filename, thumb);
+      });
+    });
+
+    // ── 2. All loose File: image links (articles, UnusedFiles, etc.) ──
+    // NOTE: this must run on every page, not just Special:UnusedFiles.
+    // The previous guard `if (isUnusedFiles || root !== document)` was
+    // wrong — it silently skipped the initial scan on regular article pages.
+    root.querySelectorAll(
+      'a[href*="/wiki/File:"], a[href*="Special:FilePath"], a.image'
+    ).forEach(link => {
+      // Skip if already handled by a gallery above
+      if (link.closest('ul.gallery, .gallerybox, [data-ffs-attached]')) return;
+      // Skip navigation / UI links that aren't real images
+      if (isNavLink(link)) return;
+      // Must actually contain an image to be a visible thumbnail
+      if (!link.querySelector('img') && !link.closest('figure')) return;
+
+      const filename = filenameFromHref(link.href);
+      if (!filename) return;
+
+      // Best container in priority order:
+      //   figure  (Fandom FandomDesktop wds-figure layout)
+      //   .thumb  (classic MediaWiki float)
+      //   li      (list galleries / UnusedFiles)
+      //   td      (table galleries)
+      //   .floatleft / .floatright  (inline floated images)
+      // Fall back to the link's direct parent only if it's not too large.
+      const container =
+        link.closest('figure') ||
+        link.closest('.thumb') ||
+        link.closest('li') ||
+        link.closest('td') ||
+        link.closest('.floatleft, .floatright') ||
+        (link.parentElement !== document.body ? link.parentElement : null);
+
+      if (!container) return;
+      addCheckbox(filename, container);
+    });
+
+    updateStatus();
+  }
+
+  /* ── toolbar ────────────────────────────────────────────── */
+  function createToolbar() {
+    if (document.getElementById('ffs-toolbar')) return;
+    const bar = document.createElement('div');
+    bar.id = 'ffs-toolbar';
+
+    const status = document.createElement('span');
+    status.className = 'ffs-status';
+    status.id = 'ffs-status';
+    status.innerHTML = 'Fandom File Selector &mdash; <strong>0</strong> selected';
+
+    bar.append(
+      status,
+      makeBtn('📋 Copy',        'ffs-btn ffs-btn-copy',     copySelected),
+      makeBtn('📄 Copy All',    'ffs-btn ffs-btn-copyall',  copyAll),
+      makeBtn('✖ Deselect All', 'ffs-btn ffs-btn-deselect', deselectAll)
+    );
+    document.body.appendChild(bar);
+  }
+
+  function makeBtn(html, cls, fn) {
+    const b = document.createElement('button');
+    b.innerHTML = html; b.className = cls;
+    b.addEventListener('click', fn);
+    return b;
+  }
+
+  function updateStatus() {
+    const el = document.getElementById('ffs-status');
+    if (!el) return;
+    const total = document.querySelectorAll('[data-ffs-file]').length;
+    el.innerHTML =
+      `Fandom File Selector &mdash; <strong>${orderedSelections.length}</strong> selected of ${total}`;
+  }
+
+  /* ── actions ────────────────────────────────────────────── */
+  function getAllCheckboxes() {
+    return [...document.querySelectorAll('[data-ffs-file]')];
+  }
+
+  function copySelected() {
+    if (!orderedSelections.length) { showToast('⚠️ No files selected!'); return; }
+    writeClip(orderedSelections.join('\n'), `Copied ${orderedSelections.length} file(s)!`);
+  }
+
+  function copyAll() {
+    const all = getAllCheckboxes().map(cb => cb.dataset.ffsFile).filter(Boolean);
+    if (!all.length) { showToast('⚠️ No files found on this page!'); return; }
+    writeClip(all.join('\n'), `Copied all ${all.length} file(s)!`);
+  }
+
+  function deselectAll() {
+    getAllCheckboxes().forEach(cb => { cb.checked = false; });
+    document.querySelectorAll('.ffs-item-selected').forEach(el =>
+      el.classList.remove('ffs-item-selected')
+    );
+    orderedSelections = [];
+    lastCheckedCb = null;
+    updateStatus();
+    showToast('Deselected all');
+  }
+
+  function writeClip(text, msg) {
+    try { GM_setClipboard(text, 'text'); showToast('✅ ' + msg); return; } catch (_) {}
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => showToast('✅ ' + msg))
+        .catch(() => execCopy(text, msg));
+    } else {
+      execCopy(text, msg);
+    }
+  }
+
+  function execCopy(text, msg) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); showToast('✅ ' + msg); }
+    catch (_) { showToast('❌ Copy failed'); }
+    document.body.removeChild(ta);
+  }
+
+  function showToast(msg) {
+    document.querySelectorAll('.ffs-toast').forEach(t => t.remove());
+    const t = document.createElement('div');
+    t.className = 'ffs-toast'; t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 2800);
+  }
+
+  /* ── init + debounced MutationObserver ──────────────────── */
+  function init() {
+    scanContainer(document);
+    createToolbar();
+
+    const pending = [];
+    let timer = null;
+
+    new MutationObserver((mutations) => {
+      // Only care about NEW element nodes — ignore attribute/text mutations
+      // (those are what image lazy-loaders fire constantly)
+      for (const mut of mutations) {
+        if (mut.type !== 'childList') continue;
+        for (const node of mut.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          // Skip our own injections and script/style nodes
+          if (
+            node.id === 'ffs-toolbar' ||
+            node.classList?.contains('ffs-anchor') ||
+            node.classList?.contains('ffs-checkbox-wrap') ||
+            node.tagName === 'SCRIPT' ||
+            node.tagName === 'STYLE'
+          ) continue;
+          pending.push(node);
+        }
+      }
+
+      if (!pending.length) return;
+
+      // Wait 400 ms of quiet before scanning — prevents thrashing during
+      // image lazy-load bursts
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const nodes = pending.splice(0);
+        nodes.forEach(n => scanContainer(n));
+      }, 400);
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
