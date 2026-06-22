@@ -1,6 +1,6 @@
 /* ================================================
    Replace Trending with Top 8 Most Edited Pages
-   Fandom-Compatible - Bigger Thumbnails + 100 page scan
+   Full Category Scan - Smart Skip Edition
    Updated: 2026-06-22
    ================================================ */
 
@@ -20,119 +20,164 @@ mw.loader.using(['mediawiki.api', 'mediawiki.util']).then(function () {
         .append('<ul class="category-page__trending-pages-list" style="list-style:none; padding:0; margin:16px 0 0 0; display:grid; grid-template-columns: repeat(4, 1fr); gap:16px;"></ul>');
 
     $trendingModule.after($newSection);
-    $newSection.find('ul').html('<li style="color:#aaa; grid-column: span 4; text-align:center;">Loading most edited pages...</li>');
+    $newSection.find('ul').html('<li style="color:#aaa; grid-column: span 4; text-align:center;">Loading...</li>');
 
     const api = new mw.Api();
     const catTitle = 'Category:' + mw.config.get('wgTitle');
 
-    // Step 1: Get up to 500 category members
-    api.get({
-        action: 'query',
-        list: 'categorymembers',
-        cmtitle: catTitle,
-        cmlimit: 500,
-        cmtype: 'page',
-        formatversion: 2
-    }).then(function (data) {
-        const members = (data.query && data.query.categorymembers) ? data.query.categorymembers : [];
+    // ── Step 1: Collect ALL category members via pagination ──────────────────
+    function getAllMembers(cmcontinue, accumulated) {
+        accumulated = accumulated || [];
 
+        const params = {
+            action: 'query',
+            list: 'categorymembers',
+            cmtitle: catTitle,
+            cmlimit: 500,
+            cmtype: 'page',
+            formatversion: 2
+        };
+        if (cmcontinue) params.cmcontinue = cmcontinue;
+
+        return api.get(params).then(function (data) {
+            const batch = (data.query && data.query.categorymembers) ? data.query.categorymembers : [];
+            accumulated = accumulated.concat(batch);
+
+            // If there's a continuation token, keep fetching
+            if (data.continue && data.continue.cmcontinue) {
+                return getAllMembers(data.continue.cmcontinue, accumulated);
+            }
+            return accumulated;
+        });
+    }
+
+    // ── Step 2: Fetch edit count for one page, with a minimum threshold ───────
+    // If the page has fewer revisions than `minToQualify`, return early with that count.
+    // This avoids wasting time counting a page that can't beat the top 8.
+    function getEditCount(title, minToQualify) {
+        return api.get({
+            action: 'query',
+            titles: title,
+            prop: 'revisions',
+            rvprop: 'ids',
+            rvlimit: minToQualify > 1 ? Math.min(minToQualify, 500) : 5,
+            formatversion: 2
+        }).then(function (revData) {
+            const pages = (revData.query && revData.query.pages) ? revData.query.pages : [];
+            if (pages.length === 0 || pages[0].missing) return 0;
+            return (pages[0].revisions || []).length;
+        }).catch(function () { return 0; });
+    }
+
+    // ── Step 3: Scan all members, maintaining a live top 8 leaderboard ────────
+    function scanAll(members) {
+        const total = members.length;
+        let scanned = 0;
+        let skipped = 0;
+
+        // Leaderboard: array of {title, count}, max 8 entries, sorted desc
+        let leaderboard = [];
+
+        function getMinToQualify() {
+            if (leaderboard.length < 8) return 2; // Must have at least 2 edits to be worth showing
+            return leaderboard[leaderboard.length - 1].count + 1; // Must beat current #8
+        }
+
+        function updateProgress() {
+            const msg = 'Scanning ' + scanned + ' / ' + total +
+                (skipped > 0 ? ' (' + skipped + ' skipped)' : '') +
+                (leaderboard.length > 0 ? ' — Current #1: ' + leaderboard[0].title + ' (' + leaderboard[0].count + ' edits)' : '');
+            $newSection.find('ul').html(
+                '<li style="color:#aaa; grid-column: span 4; text-align:center; font-size:12px;">' + msg + '</li>'
+            );
+        }
+
+        function processNext(index) {
+            if (index >= members.length) {
+                return renderResults(leaderboard);
+            }
+
+            const title = members[index].title;
+            const minToQualify = getMinToQualify();
+
+            return getEditCount(title, minToQualify).then(function (count) {
+                scanned++;
+
+                if (count >= minToQualify) {
+                    // This page qualifies — add to leaderboard
+                    leaderboard.push({ title: title, count: count });
+                    // Keep sorted descending, trim to top 8
+                    leaderboard.sort(function (a, b) { return b.count - a.count; });
+                    if (leaderboard.length > 8) leaderboard = leaderboard.slice(0, 8);
+                } else {
+                    skipped++;
+                }
+
+                updateProgress();
+                return processNext(index + 1);
+            });
+        }
+
+        return processNext(0);
+    }
+
+    // ── Step 4: Render the final top 8 ────────────────────────────────────────
+    function renderResults(leaderboard) {
+        if (leaderboard.length === 0) {
+            $newSection.find('ul').html('<li style="grid-column: span 4; text-align:center;">No edited pages found.</li>');
+            return;
+        }
+
+        const thumbTitles = leaderboard.map(e => e.title).join('|');
+
+        return api.get({
+            action: 'query',
+            titles: thumbTitles,
+            prop: 'pageimages',
+            piprop: 'thumbnail',
+            pithumbsize: 400,
+            formatversion: 2
+        }).then(function (thumbData) {
+            const thumbPages = (thumbData.query && thumbData.query.pages) ? thumbData.query.pages : [];
+            const $list = $newSection.find('ul');
+            $list.empty();
+
+            leaderboard.forEach(function (entry) {
+                const tPage = thumbPages.find(p => p.title === entry.title) || {};
+                const thumb = tPage.thumbnail
+                    ? tPage.thumbnail.source
+                    : 'https://static.wikia.nocookie.net/animated-character-database/images/7/7a/No_image_available.png';
+                const url = mw.util.getUrl(entry.title);
+
+                const $item = $(`
+                    <li style="text-align:center;">
+                        <a href="${url}" style="text-decoration:none; color:inherit;">
+                            <img src="${thumb}"
+                                 style="width:100%; height:220px; object-fit:cover; border-radius:6px; box-shadow: 0 2px 6px rgba(0,0,0,0.3);"
+                                 alt="${entry.title}">
+                            <div style="margin-top:8px; font-size:13.5px; line-height:1.35; font-weight:500;">${entry.title}</div>
+                            <div style="font-size:11px; color:#888; margin-top:3px;">${entry.count} edits</div>
+                        </a>
+                    </li>
+                `);
+                $list.append($item);
+            });
+        });
+    }
+
+    // ── Kick it all off ────────────────────────────────────────────────────────
+    getAllMembers().then(function (members) {
         if (members.length === 0) {
             $newSection.find('ul').html('<li style="grid-column: span 4; text-align:center;">No pages found.</li>');
             return;
         }
-
-        // Scan up to 100 pages — enough to find the real top 8
-        // without making hundreds of API calls
-        const scanLimit = Math.min(members.length, 100);
-        const toScan = members.slice(0, scanLimit);
-        const editCountMap = {};
-        let scanned = 0;
-
-        // Update loading message with progress
-        function updateProgress() {
-            $newSection.find('ul').html(
-                '<li style="color:#aaa; grid-column: span 4; text-align:center;">Scanning pages... ' + scanned + ' / ' + scanLimit + '</li>'
-            );
-        }
-
-        updateProgress();
-
-        function fetchNext(index) {
-            if (index >= toScan.length) {
-                return renderResults();
-            }
-
-            const title = toScan[index].title;
-
-            return api.get({
-                action: 'query',
-                titles: title,
-                prop: 'revisions',
-                rvprop: 'ids',
-                rvlimit: 'max',
-                formatversion: 2
-            }).then(function (revData) {
-                const pages = (revData.query && revData.query.pages) ? revData.query.pages : [];
-                if (pages.length > 0 && !pages[0].missing) {
-                    editCountMap[title] = (pages[0].revisions || []).length;
-                }
-                scanned++;
-                updateProgress();
-                return fetchNext(index + 1);
-            }).catch(function () {
-                editCountMap[title] = 0;
-                scanned++;
-                return fetchNext(index + 1);
-            });
-        }
-
-        function renderResults() {
-            toScan.sort(function (a, b) {
-                return (editCountMap[b.title] || 0) - (editCountMap[a.title] || 0);
-            });
-
-            const top8 = toScan.slice(0, 8);
-            const thumbTitles = top8.map(m => m.title).join('|');
-
-            return api.get({
-                action: 'query',
-                titles: thumbTitles,
-                prop: 'pageimages',
-                piprop: 'thumbnail',
-                pithumbsize: 400,
-                formatversion: 2
-            }).then(function (thumbData) {
-                const thumbPages = (thumbData.query && thumbData.query.pages) ? thumbData.query.pages : [];
-                const $list = $newSection.find('ul');
-                $list.empty();
-
-                top8.forEach(function (member) {
-                    const tPage = thumbPages.find(p => p.title === member.title) || {};
-                    const thumb = tPage.thumbnail
-                        ? tPage.thumbnail.source
-                        : 'https://static.wikia.nocookie.net/animated-character-database/images/7/7a/No_image_available.png';
-                    const url = mw.util.getUrl(member.title);
-                    const editCount = editCountMap[member.title] || 0;
-
-                    const $item = $(`
-                        <li style="text-align:center;">
-                            <a href="${url}" style="text-decoration:none; color:inherit;">
-                                <img src="${thumb}"
-                                     style="width:100%; height:220px; object-fit:cover; border-radius:6px; box-shadow: 0 2px 6px rgba(0,0,0,0.3);"
-                                     alt="${member.title}">
-                                <div style="margin-top:8px; font-size:13.5px; line-height:1.35; font-weight:500;">${member.title}</div>
-                                <div style="font-size:11px; color:#888; margin-top:3px;">${editCount} edits</div>
-                            </a>
-                        </li>
-                    `);
-                    $list.append($item);
-                });
-            });
-        }
-
-        return fetchNext(0);
-
+        $newSection.find('ul').html(
+            '<li style="color:#aaa; grid-column: span 4; text-align:center;">Found ' + members.length + ' pages. Starting scan...</li>'
+        );
+        return scanAll(members);
     }).catch(function (err) {
         console.error('[MostEdited] Error:', err);
         $newSection.find('ul').html('<li style="color:orange; grid-column: span 4; text-align:center;">Could not load pages at this time.</li>');
     });
+
+});
