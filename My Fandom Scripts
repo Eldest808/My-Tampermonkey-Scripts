@@ -1,0 +1,426 @@
+// Adds a "Clipboard Copy" to the "My Tools" menu for Special:Images
+// Special:Unusedimages and Special:ListFiles, which allows files
+// to be selected and their file names copied to the clipboard.
+// Some of the code in this came from
+//dev.fandom.com/wiki/MultipleFileDelete
+// @author Aspallar
+
+(function ($) {
+ /*global mw*/
+ 'use strict';
+
+ var pageName = mw.config.get('wgCanonicalSpecialPageName');
+
+ if (!['Unusedimages', 'Newimages', 'Listfiles'].includes(pageName))
+ return;
+
+ function selectAll() {
+ /*jshint -W040 */ // allow old school jquery this
+ var btn = $(this);
+ if (btn.text() === 'Deselect All') {
+ $('.clipboard-check').each(function() {
+ this.checked = false;
+ });
+ btn.text('Select All');
+ } else {
+ $('.clipboard-check').each(function() {
+ this.checked = true;
+ });
+ btn.text('Deselect All');
+ }
+ }
+
+ var noClipboard;
+ var appendDisabled;
+
+ function setButtonDisabledState(state) {
+ $('#btn-clipboard-copy').prop('disabled', state || noClipboard);
+ $('#btn-clipboard-append').prop('disabled', state || appendDisabled);
+ }
+
+ function selectedFileNames() {
+ var selected = $('.clipboard-check:checked');
+ var fileNames = [];
+ if (pageName === 'Newimages') {
+ selected.each(function () {
+ var href = $(this).closest('.wikia-gallery-item')
+ .find('a').attr('href');
+ var nameMatch = /File:([^"]+)/.exec(href);
+ fileNames.push(nameMatch[1]);
+ });
+ }
+ else
+ {
+ selected.each(function() {
+ var page =
+ $(this).parent().find('a').first().attr('title') ||
+ $(this).parent().find('a').first().text();
+ fileNames.push(page.substring(5)); // strip "File:"
+ });
+ }
+ return fileNames.join('\n');
+ }
+
+ function copyToClipboard() {
+ setButtonDisabledState(true);
+ navigator.clipboard.writeText(selectedFileNames()).then(function () {
+ setButtonDisabledState(false);
+ });
+ }
+
+ function appendToClipboard() {
+ setButtonDisabledState(true);
+ navigator.clipboard.readText().then(function (clipText) {
+ var fileNames = selectedFileNames();
+ var text = clipText ? [clipText, fileNames].join('\n') : fileNames;
+ navigator.clipboard.writeText(text).then(function () {
+ setButtonDisabledState(false);
+ });
+ });
+ }
+
+ var lastChecked = null;
+
+ function checkboxClick(event)
+ {
+ /*jshint -W040 */ // allow old school jquery this
+ if (lastChecked && event.shiftKey) {
+ var checkBoxes = $('.clipboard-check');
+ var start = checkBoxes.index(this);
+ var end = checkBoxes.index(lastChecked);
+ var checkedState = lastChecked.checked;
+ for (var k = Math.min(start, end), last = Math.max(start, end); k <
+ last; k++) {
+ checkBoxes[k].checked = checkedState;
+ }
+ }
+ lastChecked = this;
+ }
+
+ function addCkeckboxes() {
+ var checkbox = '<input class="clipboard-check" type="checkbox" />';
+ if (pageName === 'Unusedimages') {
+ $('.lightbox-caption').each(function() {
+ $(this).before($(checkbox).click(checkboxClick));
+ });
+ } else if (pageName === 'Newimages') {
+ $('.lightbox-caption').each(function () {
+ $(this).prepend($(checkbox).click(checkboxClick));
+ });
+ } else {
+ $('.TablePager_col_img_name').each(function () {
+ $(this).prepend($(checkbox).click(checkboxClick));
+ });
+ }
+ }
+
+ function addButtons() {
+ var buttonCommon = {
+ 'class': 'button',
+ css: {
+ cursor: 'pointer',
+ height: 'initial',
+ 'margin-left': 3,
+ }
+ };
+ var buttons = [
+ $('<button>', $.extend({
+ text: 'Select All',
+ click: selectAll,
+ }, buttonCommon)),
+ $('<button>', $.extend({
+ id: 'btn-clipboard-copy',
+ text: 'Copy',
+ click: copyToClipboard,
+ }, buttonCommon)),
+ $('<button>', $.extend({
+ id: 'btn-clipboard-append',
+ text: 'Append',
+ click: appendToClipboard,
+ }, buttonCommon))
+ ];
+
+ $('<span>')
+ .append(buttons)
+ .css({
+ position: 'fixed',
+ 'z-index': 9999,
+ bottom: 30,
+ left: 0
+ })
+ .appendTo('body');
+
+ setButtonDisabledState(false);
+ }
+
+ var started = false;
+
+ function start(event) {
+ event.preventDefault();
+ if (!started) {
+ addCkeckboxes();
+ addButtons();
+ started = true;
+ }
+ }
+
+ function addMyToolsOption() {
+ var link = $('<li>')
+ .append($('<a>').attr({href: '#'}).text('Clipboard Copy'))
+ .click(start);
+ $('#my-tools-menu').prepend(link);
+ }
+
+ function checkCapabilities() {
+ appendDisabled = true;
+ noClipboard = true;
+
+ if (!navigator || !navigator.clipboard || !navigator.clipboard.writeText)
+ return;
+
+ noClipboard = false;
+
+ if (navigator.clipboard.readText && navigator.permissions &&
+ navigator.permissions.query) {
+ navigator.permissions.query({name:'clipboard-read'}).then(function
+ (perm) {
+ appendDisabled = perm.state !== 'granted';
+ });
+ }
+ }
+
+ function initialize() {
+ checkCapabilities();
+ addMyToolsOption();
+ }
+
+ $(initialize);
+
+}(jQuery));
+
+
+// === Your existing scripts (keep everything above this) ===
+
+var MultiUploadoption = {
+ max: 99,
+ defaultlicence: 'CC-BY-SA'
+};
+
+importArticles({
+ type: 'script',
+ articles: [
+ 'u:dev:MediaWiki:ClipboardCopy.js',
+ 'u:dev:MediaWiki:MassCategorization/code.js',
+ 'u:dev:MediaWiki:CatNav/code.js',
+ 'u:dev:MediaWiki:JWB/load.js',
+ 'u:dev:MediaWiki:CleanWantedFiles/code.js',
+ 'u:dev:MediaWiki:MultipleFileDelete/code.js',
+ 'u:dev:MediaWiki:ListFiles/code.js',
+ 'dev:WikiInfo.js',
+ 'u:dev:MediaWiki:ListPages/code.js',
+ 'u:dev:MediaWiki:FixLazyloadingInsideOfScrollable.js',
+ 'u:dev:MediaWiki:MassEdit/code.js',
+ 'u:dev:MediaWiki:MultiUpload.js',
+ ]
+});
+
+
+/* ================================================
+ Replace Trending with Top 16 Most Revised Pages
+ Fandom-Compatible - Complete Layout & API Fix
+ Updated: 2026-07-05
+ ================================================ */
+
+mw.loader.using(['mediawiki.api', 'mediawiki.util']).then(function () {
+ if (mw.config.get('wgCanonicalNamespace') !== 'Category') return;
+
+ const $trendingHeader = $('.category-page__trending-pages-header');
+ const $trendingModule = $('.category-page__trending-pages');
+
+ if ($trendingModule.length === 0) return;
+
+ $trendingHeader.hide();
+ $trendingModule.hide();
+
+ // Adjusted to 8 columns and 2 rows to fit all 16 pages horizontally
+ const $newSection = $('<section class="category-page__trending-pages">')
+ .append('<h2 class="category-page__trending-pages-header">Top 16 Most Revised Pages</h2>')
+ .append('<ul class="category-page__trending-pages-list" style="list-style:none; padding:0; margin:16px 0 0 0; display:grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(2, auto); gap:16px;"></ul>');
+
+ $trendingModule.after($newSection);
+ $newSection.find('ul').html('<li style="color:#aaa; grid-column: span 8; text-align:center;">Loading...</li>');
+
+ const api = new mw.Api();
+ const catTitle = 'Category:' + mw.config.get('wgTitle');
+
+ // Step 1: Collect ALL category members via pagination
+ function getAllMembers(cmcontinue, accumulated) {
+ accumulated = accumulated || [];
+ const params = {
+ action: 'query',
+ list: 'categorymembers',
+ cmtitle: catTitle,
+ cmlimit: 500,
+ cmtype: 'page',
+ formatversion: 2
+ };
+ if (cmcontinue) params.cmcontinue = cmcontinue;
+
+ return api.get(params).then(function (data) {
+ const batch = (data.query && data.query.categorymembers) ? data.query.categorymembers : [];
+ accumulated = accumulated.concat(batch);
+ if (data.continue && data.continue.cmcontinue) {
+ return getAllMembers(data.continue.cmcontinue, accumulated);
+ }
+ return accumulated;
+ });
+ }
+
+ // Step 2: Fetch TRUE revision count for a single page
+ function getTrueRevisionCount(title) {
+ var total = 0;
+
+ function fetchPage(rvcontinue) {
+ var params = {
+ action: 'query',
+ titles: title,
+ prop: 'revisions',
+ rvprop: 'ids',
+ rvlimit: 500,
+ formatversion: 2
+ };
+ if (rvcontinue) params.rvcontinue = rvcontinue;
+
+ return api.get(params).then(function (revData) {
+ var pages = (revData.query && revData.query.pages) ? revData.query.pages : [];
+ if (pages.length > 0 && !pages[0].missing) {
+ total += (pages[0].revisions || []).length;
+ }
+ if (revData.continue && revData.continue.rvcontinue) {
+ return fetchPage(revData.continue.rvcontinue);
+ }
+ return total;
+ });
+ }
+
+ return fetchPage(null).catch(function () { return 0; });
+ }
+
+ // Step 3: Scan all members, maintaining a live top 16 leaderboard
+ function scanAll(members) {
+ var total = members.length;
+ var scanned = 0;
+ var leaderboard = [];
+
+ function updateProgress() {
+ var msg = 'Scanning ' + scanned + ' / ' + total;
+ if (leaderboard.length > 0) {
+ msg += ' — #1: ' + leaderboard[0].title + ' (' + leaderboard[0].count + ' revisions)';
+ }
+ $newSection.find('ul').html(
+ '<li style="color:#aaa; grid-column: span 8; text-align:center; font-size:12px;">' + msg + '</li>'
+ );
+ }
+
+ function processNext(index) {
+ if (index >= members.length) {
+ return renderResults(leaderboard);
+ }
+
+ var title = members[index].title;
+
+ return getTrueRevisionCount(title).then(function (count) {
+ scanned++;
+
+ if (count > 1) {
+ leaderboard.push({ title: title, count: count });
+ leaderboard.sort(function (a, b) { return b.count - a.count; });
+ if (leaderboard.length > 16) leaderboard = leaderboard.slice(0, 16);
+ }
+
+ updateProgress();
+ return processNext(index + 1);
+ });
+ }
+
+ return processNext(0);
+ }
+
+ // Step 4: Render the final top 16 with uniform card sizing
+ function renderResults(leaderboard) {
+ if (leaderboard.length === 0) {
+ $newSection.find('ul').html('<li style="grid-column: span 8; text-align:center;">No revised pages found.</li>');
+ return;
+ }
+
+ var thumbTitles = leaderboard.map(function(e) { return e.title; });
+
+ return api.get({
+ action: 'query',
+ titles: thumbTitles,
+ prop: 'pageimages',
+ piprop: 'thumbnail',
+ pithumbsize: 800,
+ formatversion: 2
+ }).then(function (thumbData) {
+ var thumbPages = (thumbData.query && thumbData.query.pages) ? thumbData.query.pages : [];
+ var $list = $newSection.find('ul');
+ $list.empty();
+
+ leaderboard.forEach(function (entry) {
+ var tPage = thumbPages.find(function(p) { return p.title === entry.title; }) || {};
+ var thumb = tPage.thumbnail
+ ? tPage.thumbnail.source
+ : 'https://static.wikia.nocookie.net/animated-character-database/images/7/7a/No_image_available.png';
+ var url = mw.util.getUrl(entry.title);
+
+ var $item = $('<li style="text-align:left; display:flex; flex-direction:column;"></li>');
+ $item.append(
+ $('<a></a>')
+ .attr('href', url)
+ .css({ textDecoration: 'none', color: 'inherit', display: 'block' })
+ .append(
+ $('<img>')
+ .attr('src', thumb)
+ .attr('alt', entry.title)
+ // Standard 120px layout height to better balance the narrow 8-column layout
+ .css({
+ width: '100%',
+ height: '120px',
+ objectFit: 'cover',
+ borderRadius: '3px',
+ backgroundColor: 'rgba(0,0,0,0.05)'
+ })
+ )
+ .append(
+ $('<div></div>')
+ .css({ marginTop: '8px', fontSize: '13px', lineHeight: '1.3', fontWeight: 'normal' })
+ .text(entry.title)
+ )
+ .append(
+ $('<div></div>')
+ .css({ fontSize: '11px', color: '#888', marginTop: '2px' })
+ .text(entry.count + ' revisions')
+ )
+ );
+ $list.append($item);
+ });
+ });
+ }
+
+ // Kick it all off
+ getAllMembers().then(function (members) {
+ if (members.length === 0) {
+ $newSection.find('ul').html('<li style="grid-column: span 8; text-align:center;">No pages found.</li>');
+ return;
+ }
+ $newSection.find('ul').html(
+ '<li style="color:#aaa; grid-column: span 8; text-align:center;">Found ' + members.length + ' pages. Starting scan...</li>'
+ );
+ return scanAll(members);
+ }).catch(function (err) {
+ console.error('[MostRevised] Error:', err);
+ $newSection.find('ul').html('<li style="color:orange; grid-column: span 8; text-align:center;">Could not load pages at this time.</li>');
+ });
+
+});
